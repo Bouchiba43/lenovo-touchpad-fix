@@ -1,0 +1,154 @@
+#!/bin/bash
+# touchpad-fix - recover the FocalTech FTCS0038 touchpad on the Lenovo LOQ 15IAX9
+# when it is frozen or missing, without rebooting.
+#
+#   touchpad-fix            restart the touchpad driver; escalate to an I2C controller
+#                           reset if the pad does not answer; wait for it to come back
+#   touchpad-fix --hard     also reset the I2C controller even if the pad answers
+#   touchpad-fix status     show the current state and today's fault count (no changes)
+#
+# Source and background: https://github.com/Bouchiba43/lenovo-touchpad-fix
+set -u
+
+HID=FTCS0038                                   # ACPI id of the touchpad
+PCI=0000:00:15.0                               # Intel LPSS I2C controller #0 (only the touchpad is on it)
+DRV=/sys/bus/i2c/drivers/i2c_hid_acpi
+LPSS=/sys/bus/pci/drivers/intel-lpss
+LOG=/var/log/touchpad-i2c.log
+ADDR=0x38                                      # I2C address of the touchpad
+WAIT=120                                       # seconds to keep retrying a silent pad
+ERR_RE='lost arbitration|controller timed out|spurious STOP|incomplete report|device: -121|failed to change power'
+
+client()    { for c in /sys/bus/i2c/devices/i2c-$HID:*; do [ -e "$c" ] && { basename "$c"; return; }; done; }
+bound()     { local c; c=$(client); [ -n "$c" ] && [ -e "/sys/bus/i2c/devices/$c/driver" ]; }
+has_input() { grep -q "$HID.*Touchpad" /proc/bus/input/devices; }
+# Ask the pad itself: 0 = answers, 1 = silent (address NACK), 2 = cannot tell.
+probe() {
+  local c bus out run=
+  c=$(client); [ -n "$c" ] || return 1
+  command -v i2ctransfer >/dev/null 2>&1 || return 2
+  [ "$(id -u)" -eq 0 ] || run="sudo -n"
+  bus=$(basename "$(dirname "$(realpath "/sys/bus/i2c/devices/$c")")"); bus=${bus#i2c-}
+  out=$($run i2ctransfer -f -y "$bus" "w2@$ADDR" 0x01 0x00 r30 2>&1) && return 0
+  case "$out" in *"Remote I/O error"*) return 1 ;; *) return 2 ;; esac
+}
+silent()    { local i; for i in 1 2 3; do probe; [ $? -eq 1 ] || return 1; sleep 0.3; done; return 0; }
+working()   { bound && has_input && ! silent; }
+say()       { printf '%s\n' "$*"; }
+note()      { echo "$(date '+%F %T') fix: $*" >> "$LOG" 2>/dev/null; }
+
+# Try to attach the driver for up to $1 seconds. Binding succeeds only if the pad answers on I2C.
+try_bind() {
+  local deadline=$((SECONDS + $1)) c
+  while :; do
+    c=$(client)
+    if [ -n "$c" ]; then
+      bound && return 0
+      echo -n "$c" > "$DRV/bind" 2>/dev/null && return 0
+    fi
+    [ "$SECONDS" -ge "$deadline" ] && return 1
+    sleep 1
+  done
+}
+
+unbind_driver() {
+  local c; c=$(client)
+  if [ -n "$c" ] && bound; then echo -n "$c" > "$DRV/unbind" 2>/dev/null; sleep 0.5; fi
+}
+
+reset_controller() {
+  [ -e "$LPSS/$PCI" ] && { echo -n "$PCI" > "$LPSS/unbind" 2>/dev/null; sleep 1; }
+  echo -n "$PCI" > "$LPSS/bind" 2>/dev/null
+  sleep 1
+}
+
+desktop_setting() {   # run as the desktop user: is the touchpad switched off in GNOME?
+  command -v gsettings >/dev/null 2>&1 || return 0
+  local v; v=$(gsettings get org.gnome.desktop.peripherals.touchpad send-events 2>/dev/null) || return 0
+  case "$v" in
+    "'disabled'")
+      if [ "${1:-}" = fix ]; then
+        gsettings set org.gnome.desktop.peripherals.touchpad send-events enabled && say "GNOME had the touchpad switched off: switched it back on."
+      else
+        say "GNOME setting:   touchpad is switched OFF in Settings (touchpad-fix turns it back on)"
+      fi ;;
+    "'disabled-on-external-mouse'") say "GNOME setting:   touchpad is disabled while an external mouse is plugged in" ;;
+    *) [ "${1:-}" = fix ] || say "GNOME setting:   enabled" ;;
+  esac
+}
+
+status() {
+  local c; c=$(client)
+  if   [ -z "$c" ];  then say "Touchpad:        NOT PRESENT (no $HID I2C device this boot)"
+  elif working;      then say "Touchpad:        OK (driver attached, pad answers on I2C)"
+  elif bound && silent; then say "Touchpad:        NOT WORKING (driver attached, but the pad is not answering on I2C)"
+  elif bound;        then say "Touchpad:        driver attached but no input device"
+  else                    say "Touchpad:        NOT WORKING (pad is not answering on I2C, no driver attached)"
+  fi
+  desktop_setting
+  say "Auto-rebind:     $(systemctl is-active touchpad-rebind.service 2>/dev/null)"
+  say "Bus faults:      $(journalctl -k --since today --no-pager 2>/dev/null | grep -cE "$ERR_RE") today, $(journalctl -k --since '-10min' --no-pager 2>/dev/null | grep -cE "$ERR_RE") in the last 10 minutes"
+  local last; last=$(grep -E ' (fix|rebind): ' "$LOG" 2>/dev/null | tail -1)
+  [ -n "$last" ] && say "Last event:      $last"
+  working
+}
+
+fix() {
+  local hard=$1 start; start=$(date '+%F %T')
+  modprobe -q i2c_hid_acpi 2>/dev/null; modprobe -q i2c-dev 2>/dev/null
+  if [ -z "$(client)" ] && [ ! -e "$LPSS/$PCI" ]; then reset_controller; fi
+
+  say "[1/3] Restarting the touchpad driver..."
+  unbind_driver
+  if [ "$hard" = 1 ]; then
+    say "[2/3] Resetting the I2C controller (--hard)..."
+    reset_controller
+  fi
+  if ! try_bind 3; then
+    if [ "$hard" != 1 ]; then
+      say "[2/3] The pad is not answering. Resetting the I2C controller..."
+      reset_controller
+    fi
+    if ! try_bind 3; then
+      say "[3/3] Still silent. Retrying for up to ${WAIT}s. Press firmly on the touchpad and the palm rest"
+      say "      around it a few times (Ctrl-C stops waiting; the background service keeps retrying)..."
+      try_bind "$WAIT"
+    fi
+  fi
+
+  for _ in 1 2 3 4 5 6; do bound && has_input && break; sleep 0.5; done
+  sleep 3                                      # a flaky pad can answer for a moment and drop out again
+  local errs; errs=$(journalctl -k --since "$start" --no-pager 2>/dev/null | grep -cE "$ERR_RE")
+  if working; then
+    say "OK: the touchpad is working again."
+    [ "$errs" -gt 0 ] && say "    ($errs I2C fault messages during the restart: the pad is still unstable)"
+    note "touchpad working after fix (hard=$hard, bus faults during fix: $errs)"
+    return 0
+  fi
+  if [ -z "$(client)" ]; then
+    say "FAILED: there is no $HID I2C device at all (ACPI did not describe the touchpad this boot)."
+  else
+    say "FAILED: the touchpad does not answer on the I2C bus, so no reset from software can reach it."
+    bound && say "        (It answered for a moment and went silent again.)"
+    say "        The auto-rebind service ($(systemctl is-active touchpad-rebind.service 2>/dev/null)) keeps retrying every 5 s and will bring it"
+    say "        back by itself when it answers; pressing around the pad has brought it back before."
+    say "        If it stays dead: shut down completely, unplug the charger, hold the power button 30 s,"
+    say "        then start again."
+  fi
+  note "touchpad still not working after fix (hard=$hard, bus faults during fix: $errs)"
+  return 1
+}
+
+case "${1:-}" in
+  -h|--help|help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  status)         status; exit $? ;;
+  ""|--hard)      ;;
+  *)              echo "touchpad-fix: unknown argument '$1' (try: touchpad-fix --help)" >&2; exit 2 ;;
+esac
+
+if [ "$(id -u)" -ne 0 ]; then
+  desktop_setting fix
+  exec sudo "$0" "$@"
+fi
+hard=0; [ "${1:-}" = --hard ] && hard=1
+fix "$hard"

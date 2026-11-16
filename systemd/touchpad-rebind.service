@@ -1,0 +1,12 @@
+[Unit]
+Description=Re-bind i2c-hid to the FTCS0038 touchpad when it starts answering (LOQ 15IAX9)
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/touchpad-rebind.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

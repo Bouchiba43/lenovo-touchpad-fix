@@ -1,0 +1,12 @@
+[Unit]
+Description=Log touchpad I2C fault bursts to /var/log/touchpad-i2c.log (LOQ 15IAX9)
+After=systemd-journald.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/touchpad-i2c-log.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

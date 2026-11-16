@@ -6,6 +6,8 @@
 #                           reset if the pad does not answer; wait for it to come back
 #   touchpad-fix --hard     also reset the I2C controller even if the pad answers
 #   touchpad-fix status     show the current state and today's fault count (no changes)
+#   --notify                report progress and the result as desktop notifications instead
+#                           of terminal output (for a keyboard shortcut)
 #
 # Source and background: https://github.com/Bouchiba43/lenovo-touchpad-fix
 set -u
@@ -139,16 +141,50 @@ fix() {
   return 1
 }
 
-case "${1:-}" in
-  -h|--help|help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  status)         status; exit $? ;;
-  ""|--hard)      ;;
-  *)              echo "touchpad-fix: unknown argument '$1' (try: touchpad-fix --help)" >&2; exit 2 ;;
-esac
+# Desktop notification; each call replaces the previous one.
+NID=
+popup() {
+  command -v notify-send >/dev/null 2>&1 || return 0
+  local id
+  id=$(notify-send -p ${NID:+-r "$NID"} -a "Touchpad fix" -i input-touchpad "$1" "${2:-}" 2>/dev/null) && NID=$id
+}
+
+mode=fix; hard=0; notify=0
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help|help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    status)         mode=status ;;
+    --hard)         hard=1 ;;
+    --notify)       notify=1 ;;
+    *)              echo "touchpad-fix: unknown argument '$arg' (try: touchpad-fix --help)" >&2; exit 2 ;;
+  esac
+done
+
+if [ "$mode" = status ]; then status; exit $?; fi
 
 if [ "$(id -u)" -ne 0 ]; then
+  args=(); [ "$hard" = 1 ] && args+=(--hard)
+  if [ "$notify" = 1 ]; then
+    # One run at a time: a second press of the shortcut while a fix is running does nothing.
+    exec 9> "${XDG_RUNTIME_DIR:-/tmp}/touchpad-fix.lock"
+    if ! flock -n 9; then popup "Touchpad fix is already running" "Wait for it to finish."; exit 0; fi
+    desktop_setting fix >/dev/null
+    popup "Resetting the touchpad..." "If it stays dead, press firmly around it. Retrying for up to 2 minutes."
+    out=$(sudo -n "$0" "${args[@]}" 2>&1); rc=$?
+    # No passwordless sudo: ask for the password in a graphical dialog instead.
+    if [[ "$out" == *"password is required"* ]] && command -v pkexec >/dev/null 2>&1; then
+      out=$(pkexec "$0" "${args[@]}" 2>&1); rc=$?
+    fi
+    case "$rc:$out" in
+      126:*|127:*) popup "Touchpad fix cancelled" "No password was given." ;;
+      *"password is required"*) popup "Touchpad fix needs your password" "Run 'touchpad-fix' in a terminal instead." ;;
+      *) if [ "$rc" -eq 0 ]; then popup "Touchpad is working again"
+         else popup "Touchpad fix failed" "$(printf '%s\n' "$out" | sed -n 's/^FAILED: //p' | tail -1)"
+         fi ;;
+    esac
+    exit "$rc"
+  fi
   desktop_setting fix
-  exec sudo "$0" "$@"
+  exec sudo "$0" "${args[@]}"
 fi
-hard=0; [ "${1:-}" = --hard ] && hard=1
 fix "$hard"

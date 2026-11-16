@@ -65,6 +65,18 @@ touchpad and the palm rest around it has brought it back before. If the pad does
 the bus at all, no software reset can reach it; the watchdog keeps retrying in the background
 and re-attaches it by itself once it answers.
 
+## Keyboard shortcut (GNOME)
+
+```sh
+./install-shortcut.sh                     # Ctrl+Alt+O runs "touchpad-fix --hard --notify"
+./install-shortcut.sh '<Control><Alt>p'   # or pick another combination
+./install-shortcut.sh --remove
+```
+
+Run it as your normal user, not with sudo. The result is shown as a desktop notification. If
+sudo needs a password, a graphical password dialog appears instead. GNOME shortcuts are modifiers
+plus one key, so a two-letter chord such as Ctrl+T+O is not possible.
+
 ## How it works
 
 **The watchdog** handles three stuck states that the kernel does not recover from on its own:

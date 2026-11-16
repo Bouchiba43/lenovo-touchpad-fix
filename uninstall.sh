@@ -23,3 +23,4 @@ if [ -e /etc/dracut.conf.d/90-loq-touchpad-acpi.conf ] || [ -e /etc/acpi-overrid
 fi
 
 echo "Removed. The fault log /var/log/touchpad-i2c.log was left in place."
+echo "If you added the keyboard shortcut, remove it as your normal user:  ./install-shortcut.sh --remove"

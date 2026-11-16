@@ -84,3 +84,4 @@ fi
 
 echo
 echo "Done. Try:  touchpad-fix status"
+echo "For a keyboard shortcut (GNOME), run as your normal user:  ./install-shortcut.sh"
